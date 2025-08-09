@@ -34,7 +34,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("bgmi_full_fixed")
 
 # Pyrogram client (bot)
-app = Client("bgmi_tourn_bot", bot_token=BOT_TOKEN)
+app = Client("bgmi_tourn_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # MongoDB (motor async)
 mongo = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
