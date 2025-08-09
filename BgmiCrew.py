@@ -1,7 +1,6 @@
-# bgmi_tournament_full.py
-# Full BGMI Tournament Bot - single-file, MongoDB-backed, admin + player flows
-# Requirements:
-#   pip install pyrogram tgcrypto motor apscheduler python-dotenv pymongo
+# bgmi_tournament_full_fixed.py
+# Fixed BGMI Tournament Bot - scheduler start moved inside running event loop
+# Single-file bot (hardcoded credentials as requested)
 
 import os
 import logging
@@ -9,22 +8,19 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import motor.motor_asyncio
 from bson import ObjectId
 
 # ------------------ CONFIG (HARDCODED - change only if you want) ------------------
-# You asked to embed credentials directly:
 BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
 MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 ADMIN_ID = 7707903995  # numeric owner/admin id
-# Optional: API_ID/API_HASH not required for bot-only usage
 API_ID = 15539500
 API_HASH = "629a8b31c82e2e9676d64d2aa3c4dbae"
-
-DB_NAME = "bgmi_tourn_db"  # Mongo DB name (will be created automatically)
+DB_NAME = "bgmi_tourn_db"
 TIMEZONE = "Asia/Kolkata"
 # ----------------------------------------------------------------------------------
 
@@ -35,7 +31,7 @@ if not BOT_TOKEN or not MONGO_URI or not ADMIN_ID:
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("bgmi_full")
+logger = logging.getLogger("bgmi_full_fixed")
 
 # Pyrogram client (bot)
 app = Client("bgmi_tourn_bot", bot_token=BOT_TOKEN)
@@ -47,9 +43,8 @@ tournaments_col = db["tournaments"]
 registrations_col = db["registrations"]
 access_col = db["access_tokens"]
 
-# Scheduler
+# Scheduler (do NOT start at import time)
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-scheduler.start()
 
 # ------------------ Helpers ------------------
 
@@ -322,10 +317,9 @@ async def send_room_details(tourn_id: str):
         uid = r["user_id"]
         try:
             sent = await app.send_message(uid, text, parse_mode="markdown")
-            # schedule deletion 30 minutes later
+            # schedule deletion 30 minutes later (scheduler can call coroutine)
             delete_time = datetime.utcnow() + timedelta(minutes=30)
-            # schedule job that calls async deletion function
-            scheduler.add_job(delete_dm_message, 'date', run_date=delete_time, args=[uid, sent.message_id])
+            scheduler.add_job(lambda u=uid, m=sent.message_id: asyncio.create_task(delete_dm_message(u, m)), 'date', run_date=delete_time)
         except Exception:
             logger.info(f"Could not DM user {uid} (maybe blocked bot).")
     # schedule reminders 10,5,1 minutes before announcement (ann_time exists)
@@ -350,11 +344,10 @@ async def send_reminder(tourn_id: str, mins_before: int):
             logger.info(f"Could not send reminder to {uid}")
 
 async def delete_dm_message(chat_id: int, message_id: int):
-    await asyncio.sleep(0)  # no-op, ensures coroutine
+    # small delay not needed here as job scheduled at run_date (delete_time)
     try:
         await app.delete_messages(chat_id, message_id)
     except Exception:
-        # if deletion fails (message older than 48 hours or already deleted), ignore
         pass
 
 # ------------------ Announce winner (admin) ------------------
@@ -366,7 +359,6 @@ async def cmd_announce_winner(client: Client, message: Message):
         await message.reply_text("Usage: /announce_winner <tourn_id> <winner_ign>")
         return
     tourn_id = args[1]; winner = args[2]
-    # set finished and store winner
     try:
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "finished", "winner": winner}})
         await message.reply_text(f"Marked tournament {tourn_id} as finished. Winner: {winner}")
@@ -391,7 +383,6 @@ async def cmd_access(client: Client, message: Message):
         await message.reply_text("Usage: /access <username_or_id> <hours>")
         return
     target = args[1]; hours = int(args[2])
-    # resolve username to id if needed
     if target.startswith("@"):
         try:
             user_obj = await app.get_users(target)
@@ -426,8 +417,22 @@ async def cb_my_regs(client: Client, callback: CallbackQuery):
     await callback.answer()
     await callback.message.reply_text(out)
 
-# ------------------ Graceful start ------------------
+# ------------------ MAIN: start app + scheduler ------------------
+
+async def main():
+    logger.info("Starting BGMI Tournament Bot (fixed start)...")
+    await app.start()
+    # now event loop is running, safe to start scheduler
+    scheduler.start()
+    logger.info("Scheduler started.")
+    # keep bot running until interrupted
+    try:
+        await idle()  # wait until Ctrl+C or stop
+    finally:
+        logger.info("Stopping bot...")
+        await app.stop()
+        scheduler.shutdown(wait=False)
+        logger.info("Bot stopped.")
 
 if __name__ == "__main__":
-    logger.info("Starting BGMI Tournament Bot...")
-    app.run()
+    asyncio.run(main())
