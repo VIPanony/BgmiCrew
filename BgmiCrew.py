@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# bgmi_tournament_clean.py
-# Cleaned BGMI Tournament Bot — debug-ready and safe scheduler start.
+# bgmi_tournament_final.py
+# Cleaned + hardened one-file BGMI tournament bot (Pyrogram 2.x compatible)
 
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Callable, Any
+from functools import partial
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
@@ -13,27 +14,27 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import motor.motor_asyncio
 from bson import ObjectId
 
-# ------------------ CONFIG (edit if needed) ------------------
+# ------------------ CONFIG (edit only these) ------------------
 BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
 MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-ADMIN_ID = 7707903995  # numeric owner/admin id
+ADMIN_ID = 7707903995
 API_ID = 24585198
 API_HASH = "199233760e0e538ba91613e478ef9cf0"
 DB_NAME = "bgmi_tourn_db"
 TIMEZONE = "Asia/Kolkata"
-SESSION_NAME = "bgmi_tourn_bot"  # name of session file; ensure no old user session with same name exists
+SESSION_NAME = "bgmi_tourn_bot"  # change if collisions with old user-session
 # ----------------------------------------------------------------------------------
 
-# basic validation
+# Basic validation
 if not BOT_TOKEN or not MONGO_URI or not ADMIN_ID:
     print("BOT_TOKEN, MONGO_URI or ADMIN_ID not set. Edit the top of this file and add credentials.")
     raise SystemExit(1)
 
-# logging
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("bgmi_clean")
+logger = logging.getLogger("bgmi_final")
 
-# Pyrogram client (bot) - ensure bot_token used
+# Pyrogram client (bot)
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # MongoDB (motor async)
@@ -43,7 +44,7 @@ tournaments_col = db["tournaments"]
 registrations_col = db["registrations"]
 access_col = db["access_tokens"]
 
-# Scheduler (do NOT auto-start at import time)
+# Scheduler (do NOT start at import time)
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 # ------------------ Helpers ------------------
@@ -74,7 +75,20 @@ HELP_KB = InlineKeyboardMarkup([
      InlineKeyboardButton("Back", callback_data="back_to_start")]
 ])
 
-creating_states = {}
+creating_states: dict = {}
+
+# Helper to schedule coroutine safely from APScheduler (which expects a callable)
+def schedule_coroutine(run_date: datetime, coro_func: Callable[..., Any], *args, **kwargs):
+    """
+    Schedule an asyncio coroutine to be created at `run_date`.
+    Use like: schedule_coroutine(ann_time, send_room_details, tourn_id)
+    """
+    def _job():
+        try:
+            asyncio.get_event_loop().create_task(coro_func(*args, **kwargs))
+        except Exception as e:
+            logger.exception("Failed to create task for scheduled job: %s", e)
+    scheduler.add_job(_job, 'date', run_date=run_date)
 
 # ------------------ Handlers ------------------
 
@@ -102,7 +116,10 @@ async def cmd_help(client: Client, message: Message):
 @app.on_callback_query(filters.regex("^help_menu$"))
 async def cb_help_menu(client: Client, callback: CallbackQuery):
     await callback.answer()
-    await callback.message.edit_text(HELP_TEXT, reply_markup=HELP_KB, parse_mode="markdown")
+    try:
+        await callback.message.edit_text(HELP_TEXT, reply_markup=HELP_KB, parse_mode="markdown")
+    except Exception:
+        await callback.message.reply_text(HELP_TEXT, reply_markup=HELP_KB, parse_mode="markdown")
 
 @app.on_callback_query(filters.regex("^back_to_start$"))
 async def cb_back_to_start(client: Client, callback: CallbackQuery):
@@ -196,6 +213,7 @@ async def cb_join_tourn(client: Client, callback: CallbackQuery):
 
 @app.on_message(filters.private & filters.text)
 async def handle_private_registration(client: Client, message: Message):
+    # Expect two parts: IGN BGMI_ID
     parts = message.text.strip().split()
     if len(parts) < 2:
         return
@@ -275,8 +293,8 @@ async def cmd_setroom(client: Client, message: Message):
     try:
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"room": {"id": room_id, "pass": room_pass, "announce_at": ann_time}, "status": "scheduled"}})
         await message.reply_text(f"Room set. Announcement scheduled at {ann_time.strftime('%Y-%m-%d %H:%M')}")
-        # schedule announcement job to create asyncio task at runtime
-        scheduler.add_job(lambda: asyncio.get_event_loop().create_task(send_room_details(tourn_id)), 'date', run_date=ann_time)
+        # schedule announcement job safely
+        schedule_coroutine(ann_time, send_room_details, tourn_id)
     except Exception as e:
         logger.exception(e)
         await message.reply_text("Error setting room. Check tourn_id.")
@@ -295,7 +313,8 @@ async def send_room_details(tourn_id: str):
         try:
             sent = await app.send_message(uid, text, parse_mode="markdown")
             delete_time = datetime.utcnow() + timedelta(minutes=30)
-            scheduler.add_job(lambda u=uid, m=sent.message_id: asyncio.get_event_loop().create_task(delete_dm_message(u,m)), 'date', run_date=delete_time)
+            # schedule delete at delete_time
+            schedule_coroutine(delete_time, delete_dm_message, uid, sent.message_id)
         except Exception:
             logger.info(f"Could not DM user {uid} (maybe blocked bot).")
     ann_time = room.get("announce_at")
@@ -303,7 +322,7 @@ async def send_room_details(tourn_id: str):
         for mins in (10, 5, 1):
             dt = ann_time - timedelta(minutes=mins)
             if dt > datetime.utcnow():
-                scheduler.add_job(lambda m=tourn_id, n=mins: asyncio.get_event_loop().create_task(send_reminder(m, n)), 'date', run_date=dt)
+                schedule_coroutine(dt, send_reminder, tourn_id, mins)
 
 async def send_reminder(tourn_id: str, mins_before: int):
     tourn = await tournaments_col.find_one({"_id": ObjectId(tourn_id)})
@@ -388,7 +407,7 @@ async def cb_my_regs(client: Client, callback: CallbackQuery):
 # ------------------ Start/Stop ------------------
 
 async def main():
-    logger.info("Starting BGMI Tournament Bot (clean start)...")
+    logger.info("Starting BGMI Tournament Bot (final start)...")
     try:
         await app.start()
     except Exception as e:
@@ -401,7 +420,6 @@ async def main():
         logger.info(f"Running as: @{getattr(me, 'username', 'N/A')} ({me.id}) is_bot={getattr(me, 'is_bot', None)}")
         if not getattr(me, 'is_bot', False):
             logger.error("Client is not a bot user! Likely using a user-session. STOP and remove old session files.")
-            # optionally stop immediately to avoid confusion
             await app.stop()
             return
     except Exception:
