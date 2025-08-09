@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# bgmi_tournament_final.py
-# Cleaned + hardened one-file BGMI tournament bot (Pyrogram 2.x compatible)
+# bgmi_bot_ready.py
+# Fresh, minimal and reliable BGMI tournament bot (Pyrogram 2.x)
 
 import logging
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Callable, Any
-from functools import partial
+import os
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
@@ -14,41 +14,40 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import motor.motor_asyncio
 from bson import ObjectId
 
-# ------------------ CONFIG (edit only these) ------------------
+# ---------------- CONFIG ----------------
 BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
-MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-ADMIN_ID = 7707903995
 API_ID = 24585198
 API_HASH = "199233760e0e538ba91613e478ef9cf0"
+SESSION_NAME = "bgmi_tourn_bot"   # change if collision with old session
+MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DB_NAME = "bgmi_tourn_db"
+ADMIN_ID = 7707903995  # owner id (numeric)
 TIMEZONE = "Asia/Kolkata"
-SESSION_NAME = "bgmi_tourn_bot"  # change if collisions with old user-session
-# ----------------------------------------------------------------------------------
+# ----------------------------------------
 
-# Basic validation
-if not BOT_TOKEN or not MONGO_URI or not ADMIN_ID:
-    print("BOT_TOKEN, MONGO_URI or ADMIN_ID not set. Edit the top of this file and add credentials.")
+# basic validation
+if not BOT_TOKEN or not ADMIN_ID or not API_ID or not API_HASH:
+    print("Please set BOT_TOKEN, ADMIN_ID, API_ID and API_HASH in the script.")
     raise SystemExit(1)
 
-# Logging
+# logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("bgmi_final")
+logger = logging.getLogger("bgmi_ready")
 
 # Pyrogram client (bot)
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# MongoDB (motor async)
+# Mongo (motor async)
 mongo = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = mongo[DB_NAME]
 tournaments_col = db["tournaments"]
 registrations_col = db["registrations"]
 access_col = db["access_tokens"]
 
-# Scheduler (do NOT start at import time)
+# Scheduler (start after client started)
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
-# ------------------ Helpers ------------------
-
+# --------- helpers ----------
 def clickable_name(user):
     name = (user.first_name or "Player")
     if getattr(user, "last_name", None):
@@ -67,7 +66,7 @@ def start_keyboard(tourn_id: Optional[str] = None):
 HELP_TEXT = (
     "*BGMI Crew — Tournament Bot Help*\n\n"
     "Players:\n- Use /start to open the main menu.\n- Click 'Join Tournament' and follow DM instructions.\n\n"
-    "Admin commands:\n- /create_tournament\n- /list_tournaments\n- /list_players <tourn_id>\n- /setroom <tourn_id> <room_id> <pass> <HH:MM>\n- /close_registration <tourn_id>\n- /announce_winner <tourn_id> <winner_ign>\n- /tokens\n- /access <username_or_id> <hours>\n"
+    "Admin commands (owner):\n- /create_tournament\n- /list_tournaments\n- /list_players <tourn_id>\n- /setroom <tourn_id> <room_id> <pass> <HH:MM>\n- /close_registration <tourn_id>\n- /announce_winner <tourn_id> <winner_ign>\n- /tokens\n- /access <username_or_id> <hours>\n"
 )
 
 HELP_KB = InlineKeyboardMarkup([
@@ -75,30 +74,26 @@ HELP_KB = InlineKeyboardMarkup([
      InlineKeyboardButton("Back", callback_data="back_to_start")]
 ])
 
-creating_states: dict = {}
+creating_states = {}
 
-# Helper to schedule coroutine safely from APScheduler (which expects a callable)
+# safe schedule helper: schedules coroutine execution at run_date
 def schedule_coroutine(run_date: datetime, coro_func: Callable[..., Any], *args, **kwargs):
-    """
-    Schedule an asyncio coroutine to be created at `run_date`.
-    Use like: schedule_coroutine(ann_time, send_room_details, tourn_id)
-    """
     def _job():
         try:
             asyncio.get_event_loop().create_task(coro_func(*args, **kwargs))
-        except Exception as e:
-            logger.exception("Failed to create task for scheduled job: %s", e)
-    scheduler.add_job(_job, 'date', run_date=run_date)
+        except Exception:
+            logger.exception("Failed creating scheduled task")
+    scheduler.add_job(_job, "date", run_date=run_date)
 
-# ------------------ Handlers ------------------
+# ---------- Handlers ----------
 
 @app.on_message(filters.command("start"))
 async def cmd_start(client: Client, message: Message):
     user = message.from_user
     try:
         upcoming = await tournaments_col.find_one({"status": "open"}, sort=[("start_at", 1)])
-    except Exception as e:
-        logger.exception("DB read error in /start: %s", e)
+    except Exception:
+        logger.exception("DB error in /start")
         upcoming = None
 
     welcome = (
@@ -108,10 +103,12 @@ async def cmd_start(client: Client, message: Message):
     )
     kb = start_keyboard(tourn_id=str(upcoming["_id"])) if upcoming else start_keyboard()
     await message.reply_text(welcome, reply_markup=kb, disable_web_page_preview=True, parse_mode="markdown")
+    logger.info("Handled /start from %s (%s)", user.first_name, user.id)
 
 @app.on_message(filters.command("help"))
 async def cmd_help(client: Client, message: Message):
     await message.reply_text(HELP_TEXT, reply_markup=HELP_KB, parse_mode="markdown")
+    logger.info("Handled /help from %s (%s)", message.from_user.first_name, message.from_user.id)
 
 @app.on_callback_query(filters.regex("^help_menu$"))
 async def cb_help_menu(client: Client, callback: CallbackQuery):
@@ -132,14 +129,15 @@ async def cb_back_to_start(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text(text, reply_markup=kb)
 
-# Admin creation flows
+# admin create (private)
 @app.on_message(filters.command("create_tournament") & filters.user(ADMIN_ID))
 async def cmd_create_tourn(client: Client, message: Message):
     chat_id = message.chat.id
     creating_states[chat_id] = {"step": "name"}
     await message.reply_text("Tournament creation started. Please send the tournament NAME (example: 'Arena Evening').")
 
-@app.on_message(filters.private & filters.user(ADMIN_ID) & filters.text)
+# admin flow in private (exclude commands!)
+@app.on_message(filters.private & filters.user(ADMIN_ID) & ~filters.command() & filters.text)
 async def admin_private_flow(client: Client, message: Message):
     chat_id = message.chat.id
     if chat_id not in creating_states:
@@ -211,11 +209,12 @@ async def cb_join_tourn(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text("I couldn't DM you. Start the bot in private chat and try again.")
 
-@app.on_message(filters.private & filters.text)
+# ---- registration from private plain text (important: exclude commands) ----
+@app.on_message(filters.private & ~filters.command() & filters.text)
 async def handle_private_registration(client: Client, message: Message):
-    # Expect two parts: IGN BGMI_ID
     parts = message.text.strip().split()
     if len(parts) < 2:
+        # not a registration; ignore silently
         return
     ign = parts[0]
     bgmi_id = parts[1]
@@ -270,8 +269,8 @@ async def cmd_close_registration(client: Client, message: Message):
     try:
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "closed"}})
         await message.reply_text("Registration closed.")
-    except Exception as e:
-        logger.exception(e)
+    except Exception:
+        logger.exception("Error closing registration")
         await message.reply_text("Error closing registration. Check tourn_id.")
 
 @app.on_message(filters.command("setroom") & filters.user(ADMIN_ID))
@@ -293,10 +292,9 @@ async def cmd_setroom(client: Client, message: Message):
     try:
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"room": {"id": room_id, "pass": room_pass, "announce_at": ann_time}, "status": "scheduled"}})
         await message.reply_text(f"Room set. Announcement scheduled at {ann_time.strftime('%Y-%m-%d %H:%M')}")
-        # schedule announcement job safely
         schedule_coroutine(ann_time, send_room_details, tourn_id)
-    except Exception as e:
-        logger.exception(e)
+    except Exception:
+        logger.exception("Error setroom")
         await message.reply_text("Error setting room. Check tourn_id.")
 
 async def send_room_details(tourn_id: str):
@@ -313,10 +311,9 @@ async def send_room_details(tourn_id: str):
         try:
             sent = await app.send_message(uid, text, parse_mode="markdown")
             delete_time = datetime.utcnow() + timedelta(minutes=30)
-            # schedule delete at delete_time
             schedule_coroutine(delete_time, delete_dm_message, uid, sent.message_id)
         except Exception:
-            logger.info(f"Could not DM user {uid} (maybe blocked bot).")
+            logger.info("Could not DM %s", uid)
     ann_time = room.get("announce_at")
     if isinstance(ann_time, datetime):
         for mins in (10, 5, 1):
@@ -335,7 +332,7 @@ async def send_reminder(tourn_id: str, mins_before: int):
         try:
             await app.send_message(uid, text, parse_mode="markdown")
         except Exception:
-            logger.info(f"Could not send reminder to {uid}")
+            logger.info("Could not reminder %s", uid)
 
 async def delete_dm_message(chat_id: int, message_id: int):
     try:
@@ -354,6 +351,7 @@ async def cmd_announce_winner(client: Client, message: Message):
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "finished", "winner": winner}})
         await message.reply_text(f"Marked tournament {tourn_id} as finished. Winner: {winner}")
     except Exception:
+        logger.exception("announce_winner error")
         await message.reply_text("Error updating tournament. Check tourn_id.")
 
 @app.on_message(filters.command("tokens") & filters.user(ADMIN_ID))
@@ -404,38 +402,34 @@ async def cb_my_regs(client: Client, callback: CallbackQuery):
     await callback.answer()
     await callback.message.reply_text(out)
 
-# ------------------ Start/Stop ------------------
-
+# ---------- start/stop ----------
 async def main():
-    logger.info("Starting BGMI Tournament Bot (final start)...")
+    logger.info("Starting BGMI bot...")
     try:
         await app.start()
-    except Exception as e:
-        logger.exception("App failed to start: %s", e)
+    except Exception:
+        logger.exception("App failed to start")
         return
 
-    # debug: who are we running as?
+    # who are we?
     try:
         me = await app.get_me()
-        logger.info(f"Running as: @{getattr(me, 'username', 'N/A')} ({me.id}) is_bot={getattr(me, 'is_bot', None)}")
-        if not getattr(me, 'is_bot', False):
-            logger.error("Client is not a bot user! Likely using a user-session. STOP and remove old session files.")
+        logger.info("Running as: @%s (%s) is_bot=%s", getattr(me, "username", "N/A"), me.id, getattr(me, "is_bot", None))
+        if not getattr(me, "is_bot", False):
+            logger.error("This client is not a bot account. Remove old session files and restart.")
             await app.stop()
             return
     except Exception:
-        logger.exception("Could not fetch bot info via get_me().")
+        logger.exception("Could not fetch get_me()")
 
-    # start scheduler after app started
     scheduler.start()
     logger.info("Scheduler started.")
-
     try:
         await idle()
     finally:
         logger.info("Stopping...")
         await app.stop()
         scheduler.shutdown(wait=False)
-        logger.info("Stopped cleanly.")
 
 if __name__ == "__main__":
     asyncio.run(main())
