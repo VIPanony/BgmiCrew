@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # bgmi_bot_ready_fixed_loop.py
-# Same as before but schedule_coroutine uses run_coroutine_threadsafe to avoid different-loop errors.
+# Fixed: replaced ~filters.command() (which required 'commands' arg) with ~filters.regex(r'^/')
+# Scheduler uses run_coroutine_threadsafe to avoid different-loop errors.
 
 import logging
 import asyncio
@@ -141,7 +142,9 @@ async def cmd_create_tourn(client: Client, message: Message):
     creating_states[chat_id] = {"step": "name"}
     await message.reply_text("Tournament creation started. Please send the tournament NAME (example: 'Arena Evening').")
 
-@app.on_message(filters.private & filters.user(ADMIN_ID) & ~filters.command() & filters.text)
+# ---- FIXED: replaced ~filters.command() with ~filters.regex(r'^/') ----
+# admin_private_flow: allow admin plain text flow but ignore messages starting with '/'
+@app.on_message(filters.private & filters.user(ADMIN_ID) & ~filters.regex(r'^/') & filters.text)
 async def admin_private_flow(client: Client, message: Message):
     chat_id = message.chat.id
     if chat_id not in creating_states:
@@ -213,7 +216,9 @@ async def cb_join_tourn(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text("I couldn't DM you. Start the bot in private chat and try again.")
 
-@app.on_message(filters.private & ~filters.command() & filters.text)
+# ---- FIXED: replaced ~filters.command() with ~filters.regex(r'^/') ----
+# registration from private plain text (ignore slash-commands)
+@app.on_message(filters.private & ~filters.regex(r'^/') & filters.text)
 async def handle_private_registration(client: Client, message: Message):
     parts = message.text.strip().split()
     if len(parts) < 2:
