@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# bgmi_bot_ready_fixed_loop.py
-# Fixed: replaced ~filters.command() (which required 'commands' arg) with ~filters.regex(r'^/')
-# Scheduler uses run_coroutine_threadsafe to avoid different-loop errors.
+# bgmi_bot_final.py
+# Final single-file BGMI tournament bot (Pyrogram v2) with loop-safe scheduler and fixed filters.
 
 import logging
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Callable, Any
 import os
+import sys
 
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
@@ -15,37 +15,43 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import motor.motor_asyncio
 from bson import ObjectId
 
-# ---------------- CONFIG ----------------
+# ---------------- CONFIG - EDIT THESE ----------------
 BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
 API_ID = 24585198
 API_HASH = "199233760e0e538ba91613e478ef9cf0"
-SESSION_NAME = "bgmi_tourn_bot"
+SESSION_NAME = "bgmi_tourn_bot"   # change if colliding with other sessions
 MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DB_NAME = "bgmi_tourn_db"
 ADMIN_ID = 7707903995
 TIMEZONE = "Asia/Kolkata"
-# ----------------------------------------
+# -----------------------------------------------------
 
+# basic validation
 if not BOT_TOKEN or not ADMIN_ID or not API_ID or not API_HASH:
     print("Please set BOT_TOKEN, ADMIN_ID, API_ID and API_HASH in the script.")
     raise SystemExit(1)
 
+# logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("bgmi_ready_fixed")
+logger = logging.getLogger("bgmi_bot_final")
 
+# pyrogram client
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# mongo (motor)
 mongo = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = mongo[DB_NAME]
 tournaments_col = db["tournaments"]
 registrations_col = db["registrations"]
 access_col = db["access_tokens"]
 
+# scheduler (start after app.start())
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
-# MAIN_LOOP will be set in main() after app.start()
+# MAIN_LOOP set on start
 MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
+# ---------------- helpers ----------------
 def clickable_name(user):
     name = (user.first_name or "Player")
     if getattr(user, "last_name", None):
@@ -72,29 +78,23 @@ HELP_KB = InlineKeyboardMarkup([
      InlineKeyboardButton("Back", callback_data="back_to_start")]
 ])
 
-creating_states = {}
+creating_states: dict = {}
 
-# ---- safe scheduling using main loop ----
+# schedule helper (thread-safe via MAIN_LOOP)
 def schedule_coroutine(run_date: datetime, coro_func: Callable[..., Any], *args, **kwargs):
-    """
-    Schedule coroutine to run at run_date by submitting it to MAIN_LOOP
-    using asyncio.run_coroutine_threadsafe — thread-safe and loop-correct.
-    """
     def _job():
         global MAIN_LOOP
         if MAIN_LOOP is None:
             logger.error("MAIN_LOOP not set — cannot schedule job")
             return
         try:
-            # schedule the coroutine onto main loop thread-safely
             asyncio.run_coroutine_threadsafe(coro_func(*args, **kwargs), MAIN_LOOP)
         except Exception:
             logger.exception("Failed to run scheduled coroutine")
-
     scheduler.add_job(_job, "date", run_date=run_date)
 
-# ---------- Handlers (same as previous) ----------
-@app.on_message(filters.command("start"))
+# ---------------- handlers ----------------
+@app.on_message(filters.command("start", prefixes=["/", "!"]) & filters.private)
 async def cmd_start(client: Client, message: Message):
     user = message.from_user
     try:
@@ -112,7 +112,7 @@ async def cmd_start(client: Client, message: Message):
     await message.reply_text(welcome, reply_markup=kb, disable_web_page_preview=True, parse_mode="markdown")
     logger.info("Handled /start from %s (%s)", user.first_name, user.id)
 
-@app.on_message(filters.command("help"))
+@app.on_message(filters.command("help", prefixes=["/", "!"]) & filters.private)
 async def cmd_help(client: Client, message: Message):
     await message.reply_text(HELP_TEXT, reply_markup=HELP_KB, parse_mode="markdown")
     logger.info("Handled /help from %s (%s)", message.from_user.first_name, message.from_user.id)
@@ -136,14 +136,14 @@ async def cb_back_to_start(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text(text, reply_markup=kb)
 
-@app.on_message(filters.command("create_tournament") & filters.user(ADMIN_ID))
+# admin create flow (start)
+@app.on_message(filters.command("create_tournament", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_create_tourn(client: Client, message: Message):
     chat_id = message.chat.id
     creating_states[chat_id] = {"step": "name"}
     await message.reply_text("Tournament creation started. Please send the tournament NAME (example: 'Arena Evening').")
 
-# ---- FIXED: replaced ~filters.command() with ~filters.regex(r'^/') ----
-# admin_private_flow: allow admin plain text flow but ignore messages starting with '/'
+# ADMIN private flow - ignore messages starting with '/' to avoid treating commands as flow input
 @app.on_message(filters.private & filters.user(ADMIN_ID) & ~filters.regex(r'^/') & filters.text)
 async def admin_private_flow(client: Client, message: Message):
     chat_id = message.chat.id
@@ -189,7 +189,7 @@ async def admin_private_flow(client: Client, message: Message):
             await message.reply_text("Slots must be an integer. Try again.")
         return
 
-@app.on_message(filters.command("list_tournaments") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("list_tournaments", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_list_tournaments(client: Client, message: Message):
     cursor = tournaments_col.find({})
     out = "*Tournaments:*\n"
@@ -216,8 +216,7 @@ async def cb_join_tourn(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text("I couldn't DM you. Start the bot in private chat and try again.")
 
-# ---- FIXED: replaced ~filters.command() with ~filters.regex(r'^/') ----
-# registration from private plain text (ignore slash-commands)
+# private registration (ignore slash commands)
 @app.on_message(filters.private & ~filters.regex(r'^/') & filters.text)
 async def handle_private_registration(client: Client, message: Message):
     parts = message.text.strip().split()
@@ -253,7 +252,7 @@ async def handle_private_registration(client: Client, message: Message):
     except Exception:
         logger.info("Could not notify admin DM.")
 
-@app.on_message(filters.command("list_players") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("list_players", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_list_players(client: Client, message: Message):
     args = message.text.split()
     if len(args) < 2:
@@ -266,7 +265,7 @@ async def cmd_list_players(client: Client, message: Message):
         out += f"- {r.get('ign')} (tg: @{r.get('username') or 'N/A'})\n"
     await message.reply_text(out)
 
-@app.on_message(filters.command("close_registration") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("close_registration", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_close_registration(client: Client, message: Message):
     args = message.text.split()
     if len(args) < 2:
@@ -280,7 +279,7 @@ async def cmd_close_registration(client: Client, message: Message):
         logger.exception("Error closing registration")
         await message.reply_text("Error closing registration. Check tourn_id.")
 
-@app.on_message(filters.command("setroom") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("setroom", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_setroom(client: Client, message: Message):
     args = message.text.split()
     if len(args) < 5:
@@ -347,7 +346,7 @@ async def delete_dm_message(chat_id: int, message_id: int):
     except Exception:
         pass
 
-@app.on_message(filters.command("announce_winner") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("announce_winner", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_announce_winner(client: Client, message: Message):
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
@@ -360,7 +359,7 @@ async def cmd_announce_winner(client: Client, message: Message):
     except Exception:
         await message.reply_text("Error updating tournament. Check tourn_id.")
 
-@app.on_message(filters.command("tokens") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("tokens", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_tokens(client: Client, message: Message):
     cursor = access_col.find({})
     out = "Active access tokens (temporary premium):\n"
@@ -369,7 +368,7 @@ async def cmd_tokens(client: Client, message: Message):
         out += f"- user_id: {a.get('user_id')} | until: {expires}\n"
     await message.reply_text(out)
 
-@app.on_message(filters.command("access") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("access", prefixes=["/", "!"]) & filters.user(ADMIN_ID))
 async def cmd_access(client: Client, message: Message):
     args = message.text.split()
     if len(args) < 3:
@@ -408,17 +407,16 @@ async def cb_my_regs(client: Client, callback: CallbackQuery):
     await callback.answer()
     await callback.message.reply_text(out)
 
-# ---- start/stop ----
+# --------------- start/stop ---------------
 async def main():
     global MAIN_LOOP
-    logger.info("Starting BGMI bot (fixed-loop)...")
+    logger.info("Starting BGMI bot (final)...")
     try:
         await app.start()
     except Exception:
         logger.exception("App failed to start")
         return
 
-    # set main loop so scheduled jobs can be submitted safely
     MAIN_LOOP = asyncio.get_running_loop()
     try:
         me = await app.get_me()
@@ -438,6 +436,11 @@ async def main():
         logger.info("Stopping...")
         await app.stop()
         scheduler.shutdown(wait=False)
+        logger.info("Stopped cleanly.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Interrupted, exiting.")
+        sys.exit(0)
