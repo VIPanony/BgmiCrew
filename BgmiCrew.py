@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# bgmi_bot_ready.py
-# Fresh, minimal and reliable BGMI tournament bot (Pyrogram 2.x)
+# bgmi_bot_ready_fixed_loop.py
+# Same as before but schedule_coroutine uses run_coroutine_threadsafe to avoid different-loop errors.
 
 import logging
 import asyncio
@@ -18,36 +18,33 @@ from bson import ObjectId
 BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
 API_ID = 24585198
 API_HASH = "199233760e0e538ba91613e478ef9cf0"
-SESSION_NAME = "bgmi_tourn_bot"   # change if collision with old session
+SESSION_NAME = "bgmi_tourn_bot"
 MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DB_NAME = "bgmi_tourn_db"
-ADMIN_ID = 7707903995  # owner id (numeric)
+ADMIN_ID = 7707903995
 TIMEZONE = "Asia/Kolkata"
 # ----------------------------------------
 
-# basic validation
 if not BOT_TOKEN or not ADMIN_ID or not API_ID or not API_HASH:
     print("Please set BOT_TOKEN, ADMIN_ID, API_ID and API_HASH in the script.")
     raise SystemExit(1)
 
-# logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("bgmi_ready")
+logger = logging.getLogger("bgmi_ready_fixed")
 
-# Pyrogram client (bot)
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Mongo (motor async)
 mongo = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = mongo[DB_NAME]
 tournaments_col = db["tournaments"]
 registrations_col = db["registrations"]
 access_col = db["access_tokens"]
 
-# Scheduler (start after client started)
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
-# --------- helpers ----------
+# MAIN_LOOP will be set in main() after app.start()
+MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
 def clickable_name(user):
     name = (user.first_name or "Player")
     if getattr(user, "last_name", None):
@@ -76,17 +73,26 @@ HELP_KB = InlineKeyboardMarkup([
 
 creating_states = {}
 
-# safe schedule helper: schedules coroutine execution at run_date
+# ---- safe scheduling using main loop ----
 def schedule_coroutine(run_date: datetime, coro_func: Callable[..., Any], *args, **kwargs):
+    """
+    Schedule coroutine to run at run_date by submitting it to MAIN_LOOP
+    using asyncio.run_coroutine_threadsafe — thread-safe and loop-correct.
+    """
     def _job():
+        global MAIN_LOOP
+        if MAIN_LOOP is None:
+            logger.error("MAIN_LOOP not set — cannot schedule job")
+            return
         try:
-            asyncio.get_event_loop().create_task(coro_func(*args, **kwargs))
+            # schedule the coroutine onto main loop thread-safely
+            asyncio.run_coroutine_threadsafe(coro_func(*args, **kwargs), MAIN_LOOP)
         except Exception:
-            logger.exception("Failed creating scheduled task")
+            logger.exception("Failed to run scheduled coroutine")
+
     scheduler.add_job(_job, "date", run_date=run_date)
 
-# ---------- Handlers ----------
-
+# ---------- Handlers (same as previous) ----------
 @app.on_message(filters.command("start"))
 async def cmd_start(client: Client, message: Message):
     user = message.from_user
@@ -129,14 +135,12 @@ async def cb_back_to_start(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text(text, reply_markup=kb)
 
-# admin create (private)
 @app.on_message(filters.command("create_tournament") & filters.user(ADMIN_ID))
 async def cmd_create_tourn(client: Client, message: Message):
     chat_id = message.chat.id
     creating_states[chat_id] = {"step": "name"}
     await message.reply_text("Tournament creation started. Please send the tournament NAME (example: 'Arena Evening').")
 
-# admin flow in private (exclude commands!)
 @app.on_message(filters.private & filters.user(ADMIN_ID) & ~filters.command() & filters.text)
 async def admin_private_flow(client: Client, message: Message):
     chat_id = message.chat.id
@@ -209,12 +213,10 @@ async def cb_join_tourn(client: Client, callback: CallbackQuery):
     except Exception:
         await callback.message.reply_text("I couldn't DM you. Start the bot in private chat and try again.")
 
-# ---- registration from private plain text (important: exclude commands) ----
 @app.on_message(filters.private & ~filters.command() & filters.text)
 async def handle_private_registration(client: Client, message: Message):
     parts = message.text.strip().split()
     if len(parts) < 2:
-        # not a registration; ignore silently
         return
     ign = parts[0]
     bgmi_id = parts[1]
@@ -351,7 +353,6 @@ async def cmd_announce_winner(client: Client, message: Message):
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "finished", "winner": winner}})
         await message.reply_text(f"Marked tournament {tourn_id} as finished. Winner: {winner}")
     except Exception:
-        logger.exception("announce_winner error")
         await message.reply_text("Error updating tournament. Check tourn_id.")
 
 @app.on_message(filters.command("tokens") & filters.user(ADMIN_ID))
@@ -402,16 +403,18 @@ async def cb_my_regs(client: Client, callback: CallbackQuery):
     await callback.answer()
     await callback.message.reply_text(out)
 
-# ---------- start/stop ----------
+# ---- start/stop ----
 async def main():
-    logger.info("Starting BGMI bot...")
+    global MAIN_LOOP
+    logger.info("Starting BGMI bot (fixed-loop)...")
     try:
         await app.start()
     except Exception:
         logger.exception("App failed to start")
         return
 
-    # who are we?
+    # set main loop so scheduled jobs can be submitted safely
+    MAIN_LOOP = asyncio.get_running_loop()
     try:
         me = await app.get_me()
         logger.info("Running as: @%s (%s) is_bot=%s", getattr(me, "username", "N/A"), me.id, getattr(me, "is_bot", None))
