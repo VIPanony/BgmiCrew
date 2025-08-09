@@ -18,8 +18,8 @@ from bson import ObjectId
 BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
 MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 ADMIN_ID = 7707903995  # numeric owner/admin id
-API_ID = 15539500
-API_HASH = "629a8b31c82e2e9676d64d2aa3c4dbae"
+API_ID = 24585198
+API_HASH = "199233760e0e538ba91613e478ef9cf0"
 DB_NAME = "bgmi_tourn_db"
 TIMEZONE = "Asia/Kolkata"
 # ----------------------------------------------------------------------------------
