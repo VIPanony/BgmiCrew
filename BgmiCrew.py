@@ -1,94 +1,98 @@
-# bgmi_tournament_bot.py
-# Single-file BGMI Tournament Bot (MongoDB backed)
+# bgmi_tournament_full.py
+# Full BGMI Tournament Bot - single-file, MongoDB-backed, admin + player flows
 # Requirements:
 #   pip install pyrogram tgcrypto motor apscheduler python-dotenv pymongo
-#
-# Put a .env file in same folder with:
-# BOT_TOKEN=123456:ABC-DEF...
-# MONGO_URI=mongodb+srv://user:pass@cluster0.../dbname
-# ADMIN_ID=7707903995
-# TIMEZONE=Asia/Kolkata    # optional
 
 import os
 import logging
-from datetime import datetime, timedelta
 import asyncio
+from datetime import datetime, timedelta
+from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import motor.motor_asyncio
-from dotenv import load_dotenv
 from bson import ObjectId
 
-# --- Load config ---
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
-ADMIN_ID = int(os.getenv("7707903995") or 0)
-TIMEZONE = os.getenv("TIMEZONE", "Asia/Kolkata")
+# ------------------ CONFIG (HARDCODED - change only if you want) ------------------
+# You asked to embed credentials directly:
+BOT_TOKEN = "8274531701:AAF4mIvbc36WX-V6NYuJsGljphMbWtbaHJM"
+MONGO_URI = "mongodb+srv://adsrunnerpro:adsrunnerpro@cluster0.2zzs40v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+ADMIN_ID = 7707903995  # numeric owner/admin id
+# Optional: API_ID/API_HASH not required for bot-only usage
+API_ID = 15539500
+API_HASH = "629a8b31c82e2e9676d64d2aa3c4dbae"
 
-if not BOT_TOKEN or not MONGO_URI or ADMIN_ID == 0:
-    print("Please set BOT_TOKEN, MONGO_URI and ADMIN_ID in .env before running.")
+DB_NAME = "bgmi_tourn_db"  # Mongo DB name (will be created automatically)
+TIMEZONE = "Asia/Kolkata"
+# ----------------------------------------------------------------------------------
+
+# Basic validation
+if not BOT_TOKEN or not MONGO_URI or not ADMIN_ID:
+    print("BOT_TOKEN, MONGO_URI or ADMIN_ID not set. Edit the top of this file and add credentials.")
     exit(1)
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("bgmi_tourn")
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("bgmi_full")
 
-# --- Bot client ---
+# Pyrogram client (bot)
 app = Client("bgmi_tourn_bot", bot_token=BOT_TOKEN)
 
-# --- MongoDB ---
+# MongoDB (motor async)
 mongo = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
-db = mongo.get_default_database()
+db = mongo[DB_NAME]
 tournaments_col = db["tournaments"]
 registrations_col = db["registrations"]
 access_col = db["access_tokens"]
 
-# --- Scheduler ---
-scheduler = AsyncIOScheduler()
+# Scheduler
+scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 scheduler.start()
 
-# --- Helpers ---
+# ------------------ Helpers ------------------
+
 def clickable_name(user):
-    name = user.first_name or "Player"
-    if user.last_name:
+    """Return markdown clickable user mention"""
+    name = (user.first_name or "Player")
+    if getattr(user, "last_name", None):
         name += f" {user.last_name}"
     return f"[{name}](tg://user?id={user.id})"
 
-def start_keyboard(t_id=None):
+def start_keyboard(tourn_id: Optional[str] = None):
     kb = []
-    if t_id:
-        kb.append([InlineKeyboardButton("View Tournament", callback_data=f"view_{t_id}")])
+    if tourn_id:
+        kb.append([InlineKeyboardButton("View Tournament", callback_data=f"view_{tourn_id}")])
     kb.append([InlineKeyboardButton("Join Tournament", callback_data="join_tourn")])
-    kb.append([InlineKeyboardButton("My Registrations", callback_data="my_regs"),
-               InlineKeyboardButton("Help", callback_data="help_menu")])
+    kb.append([InlineKeyboardButton("My Registrations", callback_data="my_regs"), InlineKeyboardButton("Help", callback_data="help_menu")])
     return InlineKeyboardMarkup(kb)
 
 HELP_TEXT = (
-    "*BGMI Crew Tournament Bot — Help*\n\n"
+    "*BGMI Crew — Tournament Bot Help*\n\n"
     "*Players:*\n"
-    "- /start : Open menu\n"
-    "- Use Join Tournament button and follow DM instructions to register (IGN + BGMI_ID)\n\n"
-    "*Admin:*\n"
-    "- /create_tournament (private to admin): interactive creation\n"
-    "- /list_tournaments : list all tournaments\n"
-    "- /list_players <tourn_id> : list players\n"
-    "- /setroom <tourn_id> <room_id> <pass> <HH:MM> : set room and schedule announcement\n"
-    "- /close_registration <tourn_id> : stop registrations\n"
-    "- /announce_winner <tourn_id> <winner_ign> : announce winner & close\n"
+    "- Use /start to open the main menu.\n"
+    "- Click 'Join Tournament' and follow DM instructions (IGN + BGMI ID).\n\n"
+    "*Admin commands (owner only):*\n"
+    "- /create_tournament (private to admin) -> interactive flow: name, format, start, slots.\n"
+    "- /list_tournaments -> list all tournaments.\n"
+    "- /list_players <tourn_id> -> list registered players.\n"
+    "- /setroom <tourn_id> <room_id> <pass> <HH:MM> -> set room and schedule announcement (server timezone).\n"
+    "- /close_registration <tourn_id> -> close registration for a tournament.\n"
+    "- /announce_winner <tourn_id> <winner_ign> -> announce & finish tournament.\n"
+    "- /tokens -> list active premium/access tokens.\n"
+    "- /access <username_or_id> <hours> -> grant temporary bypass access.\n\n"
+    "Notes: This bot currently handles free tournaments. Paid integration can be added later."
 )
 
 HELP_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Contact Admin", url=f"tg://user?id={ADMIN_ID}"),
-     InlineKeyboardButton("Back", callback_data="back_to_start")]
+    [InlineKeyboardButton("Contact Admin", url=f"tg://user?id={ADMIN_ID}"), InlineKeyboardButton("Back", callback_data="back_to_start")]
 ])
 
-# interactive admin state store (in-memory)
+# In-memory admin creation state (for interactive private flow)
 creating_states = {}
 
-# --- Handlers ---
+# ------------------ Handlers (Player & Admin) ------------------
 
 @app.on_message(filters.command("start"))
 async def cmd_start(client: Client, message: Message):
@@ -97,10 +101,10 @@ async def cmd_start(client: Client, message: Message):
         f"Hello {clickable_name(user)}!\n\n"
         "Welcome to BGMI Crew Tournament Hub.\n"
         "Use the buttons below to join the active tournament or view your registrations.\n"
-        "Tournament room details will be sent privately before match start."
+        "Room details will be DM'd before match start. Good luck!"
     )
     upcoming = await tournaments_col.find_one({"status": "open"}, sort=[("start_at", 1)])
-    kb = start_keyboard(str(upcoming["_id"])) if upcoming else start_keyboard()
+    kb = start_keyboard(tourn_id=str(upcoming["_id"])) if upcoming else start_keyboard()
     await message.reply_text(welcome, reply_markup=kb, disable_web_page_preview=True, parse_mode="markdown")
 
 @app.on_message(filters.command("help"))
@@ -116,16 +120,20 @@ async def cb_help_menu(client: Client, callback: CallbackQuery):
 async def cb_back_to_start(client: Client, callback: CallbackQuery):
     await callback.answer()
     upcoming = await tournaments_col.find_one({"status": "open"}, sort=[("start_at", 1)])
-    kb = start_keyboard(str(upcoming["_id"])) if upcoming else start_keyboard()
+    kb = start_keyboard(tourn_id=str(upcoming["_id"])) if upcoming else start_keyboard()
     text = "Main menu — use /start to open full interface."
-    await callback.message.edit_text(text, reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await callback.message.reply_text(text, reply_markup=kb)
 
-# Admin: start interactive creation (private chat recommended)
+# ------------------ Admin: create tournament (interactive private flow) ------------------
+
 @app.on_message(filters.command("create_tournament") & filters.user(ADMIN_ID))
 async def cmd_create_tourn(client: Client, message: Message):
     chat_id = message.chat.id
     creating_states[chat_id] = {"step": "name"}
-    await message.reply_text("Tournament creation started. Send tournament name:")
+    await message.reply_text("Tournament creation started. Please send the tournament NAME (example: 'Arena Evening').")
 
 @app.on_message(filters.private & filters.user(ADMIN_ID) & filters.text)
 async def admin_private_flow(client: Client, message: Message):
@@ -137,21 +145,21 @@ async def admin_private_flow(client: Client, message: Message):
     if state["step"] == "name":
         state["name"] = text
         state["step"] = "format"
-        await message.reply_text("Send format (1v1 / 2v2 / 4v4):")
+        await message.reply_text("Send FORMAT (1v1 / 2v2 / 4v4).")
         return
     if state["step"] == "format":
         state["format"] = text
         state["step"] = "start"
-        await message.reply_text("Send start datetime in YYYY-MM-DD HH:MM (server timezone):")
+        await message.reply_text("Send START DATETIME in format YYYY-MM-DD HH:MM (server timezone).")
         return
     if state["step"] == "start":
         try:
             start_at = datetime.strptime(text, "%Y-%m-%d %H:%M")
             state["start_at"] = start_at
             state["step"] = "slots"
-            await message.reply_text("Send max slots (integer):")
+            await message.reply_text("Send MAX SLOTS (integer).")
         except Exception:
-            await message.reply_text("Invalid datetime format. Use YYYY-MM-DD HH:MM")
+            await message.reply_text("Invalid datetime. Use YYYY-MM-DD HH:MM.")
         return
     if state["step"] == "slots":
         try:
@@ -166,11 +174,13 @@ async def admin_private_flow(client: Client, message: Message):
                 "created_at": datetime.utcnow()
             }
             res = await tournaments_col.insert_one(doc)
-            await message.reply_text(f"Tournament created with id: {res.inserted_id}")
+            await message.reply_text(f"Tournament created with id: {res.inserted_id}\nUse /list_tournaments to view.")
             creating_states.pop(chat_id, None)
         except Exception:
-            await message.reply_text("Slots must be integer. Try again.")
+            await message.reply_text("Slots must be an integer. Try again.")
         return
+
+# ------------------ Admin: list tournaments ------------------
 
 @app.on_message(filters.command("list_tournaments") & filters.user(ADMIN_ID))
 async def cmd_list_tournaments(client: Client, message: Message):
@@ -183,23 +193,27 @@ async def cmd_list_tournaments(client: Client, message: Message):
         out += f"\nID: {tid}\nName: {t.get('name')}\nFormat: {t.get('format')}\nStart: {start_str}\nSlots: {t.get('max_slots')}\nStatus: {t.get('status')}\n"
     await message.reply_text(out, parse_mode="markdown")
 
-# Player presses Join button -> bot instructs to DM IGN BGMI_ID
+# ------------------ Player: Join flow via button & DM ------------------
+
 @app.on_callback_query(filters.regex("^join_tourn$"))
 async def cb_join_tourn(client: Client, callback: CallbackQuery):
-    await callback.answer("Please follow DM instructions to complete registration.")
+    await callback.answer("Follow DM instructions to complete registration.")
     user = callback.from_user
     upcoming = await tournaments_col.find_one({"status": "open"}, sort=[("start_at", 1)])
     if not upcoming:
-        await callback.message.reply_text("No open tournament right now.")
+        try:
+            await callback.message.reply_text("No open tournament right now.")
+        except:
+            pass
         return
     try:
         await client.send_message(user.id, "Send your IGN and BGMI numeric ID in one message like:\n`IGN123 1234567890`", parse_mode="markdown")
     except Exception:
-        await callback.message.reply_text("I couldn't DM you. Start the bot in private and try again.")
+        await callback.message.reply_text("I couldn't DM you. Start the bot in private chat and try again.")
 
 @app.on_message(filters.private & filters.text)
 async def handle_private_registration(client: Client, message: Message):
-    # Expect: IGN BGMI_ID
+    # Expect two parts: IGN BGMI_ID
     parts = message.text.strip().split()
     if len(parts) < 2:
         return
@@ -216,7 +230,7 @@ async def handle_private_registration(client: Client, message: Message):
         return
     count = await registrations_col.count_documents({"tourn_id": tourn_id})
     if count >= upcoming.get("max_slots", 9999):
-        await message.reply_text("Registration full for this tournament.")
+        await message.reply_text("Registration is full for this tournament.")
         return
     doc = {
         "tourn_id": tourn_id,
@@ -227,11 +241,14 @@ async def handle_private_registration(client: Client, message: Message):
         "registered_at": datetime.utcnow()
     }
     await registrations_col.insert_one(doc)
-    await message.reply_text(f"✅ Registration complete for tournament *{upcoming.get('name')}* ! Good luck.", parse_mode="markdown")
+    await message.reply_text(f"✅ Registration complete for tournament *{upcoming.get('name')}*! Good luck.", parse_mode="markdown")
+    # notify admin
     try:
         await client.send_message(ADMIN_ID, f"New registration:\nTournament: {upcoming.get('name')}\nUser: {clickable_name(message.from_user)}\nIGN: {ign} | BGMI ID: {bgmi_id}", parse_mode="markdown")
     except Exception:
-        logger.info("Could not notify admin.")
+        logger.info("Could not notify admin DM.")
+
+# ------------------ Admin: list players ------------------
 
 @app.on_message(filters.command("list_players") & filters.user(ADMIN_ID))
 async def cmd_list_players(client: Client, message: Message):
@@ -246,6 +263,8 @@ async def cmd_list_players(client: Client, message: Message):
         out += f"- {r.get('ign')} (tg: @{r.get('username') or 'N/A'})\n"
     await message.reply_text(out)
 
+# ------------------ Admin: close registration ------------------
+
 @app.on_message(filters.command("close_registration") & filters.user(ADMIN_ID))
 async def cmd_close_registration(client: Client, message: Message):
     args = message.text.split()
@@ -256,10 +275,12 @@ async def cmd_close_registration(client: Client, message: Message):
     try:
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "closed"}})
         await message.reply_text("Registration closed.")
-    except Exception:
-        await message.reply_text("Error closing registration. Ensure tourn_id is valid.")
+    except Exception as e:
+        logger.exception(e)
+        await message.reply_text("Error closing registration. Check tourn_id.")
 
-# Set room & schedule announcement (admin)
+# ------------------ Admin: set room & schedule announcement ------------------
+
 @app.on_message(filters.command("setroom") & filters.user(ADMIN_ID))
 async def cmd_setroom(client: Client, message: Message):
     # /setroom <tourn_id> <room_id> <pass> <HH:MM>
@@ -275,59 +296,68 @@ async def cmd_setroom(client: Client, message: Message):
         if ann_time < now:
             ann_time += timedelta(days=1)
     except Exception:
-        await message.reply_text("Invalid time. Use HH:MM 24-hour.")
+        await message.reply_text("Invalid time format. Use HH:MM (24h).")
         return
     try:
         await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"room": {"id": room_id, "pass": room_pass, "announce_at": ann_time}, "status": "scheduled"}})
         await message.reply_text(f"Room set. Announcement scheduled at {ann_time.strftime('%Y-%m-%d %H:%M')}")
-        # schedule announcement job
-        scheduler.add_job(send_room_details_job, 'date', run_date=ann_time, args=[tourn_id])
+        # schedule announcement job (async function supported)
+        scheduler.add_job(send_room_details, 'date', run_date=ann_time, args=[tourn_id])
     except Exception as e:
         logger.exception(e)
         await message.reply_text("Error setting room. Check tourn_id.")
 
-async def send_room_details_job(tourn_id: str):
+async def send_room_details(tourn_id: str):
+    """Send room details DM to all registrants and schedule reminders & auto-delete"""
+    tourn = await tournaments_col.find_one({"_id": ObjectId(tourn_id)})
+    if not tourn or "room" not in tourn:
+        return
+    room = tourn["room"]
+    regs_cursor = registrations_col.find({"tourn_id": tourn_id})
+    start_at = tourn.get("start_at")
+    start_str = start_at.strftime("%Y-%m-%d %H:%M") if isinstance(start_at, datetime) else str(start_at)
+    text = f"🔔 *Room Details* for *{tourn.get('name')}*\n\nRoom ID: `{room.get('id')}`\nPassword: `{room.get('pass')}`\nStart Time: {start_str}\n\nJoin on time. Good luck!"
+    # DM all registered users (and schedule auto-delete of the room-detail message after 30 minutes)
+    async for r in regs_cursor:
+        uid = r["user_id"]
+        try:
+            sent = await app.send_message(uid, text, parse_mode="markdown")
+            # schedule deletion 30 minutes later
+            delete_time = datetime.utcnow() + timedelta(minutes=30)
+            # schedule job that calls async deletion function
+            scheduler.add_job(delete_dm_message, 'date', run_date=delete_time, args=[uid, sent.message_id])
+        except Exception:
+            logger.info(f"Could not DM user {uid} (maybe blocked bot).")
+    # schedule reminders 10,5,1 minutes before announcement (ann_time exists)
+    ann_time = room.get("announce_at")
+    if isinstance(ann_time, datetime):
+        for mins in (10, 5, 1):
+            dt = ann_time - timedelta(minutes=mins)
+            if dt > datetime.utcnow():
+                scheduler.add_job(send_reminder, 'date', run_date=dt, args=[tourn_id, mins])
+
+async def send_reminder(tourn_id: str, mins_before: int):
     tourn = await tournaments_col.find_one({"_id": ObjectId(tourn_id)})
     if not tourn:
         return
     regs_cursor = registrations_col.find({"tourn_id": tourn_id})
-    text = f"🔔 *Room Details* for *{tourn.get('name')}*\nRoom ID: `{tourn['room']['id']}`\nPassword: `{tourn['room']['pass']}`\nStart Time: {tourn.get('start_at')}"
-    # DM all regs
+    text = f"⏰ Reminder: match *{tourn.get('name')}* starts in {mins_before} minutes. Get ready!"
     async for r in regs_cursor:
+        uid = r["user_id"]
         try:
-            await app.send_message(r["user_id"], text, parse_mode="markdown")
-            # schedule deletion of this DM after 30 minutes
-            msg = await app.send_message(r["user_id"], "This message will auto-delete in 30 minutes (room details above).")
-            # schedule deletion
-            scheduler.add_job(lambda mid=msg.message_id, uid=r["user_id"]: asyncio.create_task(delete_message_after(uid, mid, 30*60)), 'date', run_date=datetime.now() + timedelta(seconds=1))
+            await app.send_message(uid, text, parse_mode="markdown")
         except Exception:
-            logger.info(f"Could not DM user {r['user_id']}")
-    # schedule reminders 10,5,1 mins before announcement time
-    ann_time = tourn['room'].get('announce_at')
-    if isinstance(ann_time, datetime):
-        for mins in (10,5,1):
-            dt = ann_time - timedelta(minutes=mins)
-            if dt > datetime.now():
-                scheduler.add_job(send_reminder_job, 'date', run_date=dt, args=[tourn_id, mins])
+            logger.info(f"Could not send reminder to {uid}")
 
-async def delete_message_after(chat_id: int, message_id: int, delay_seconds: int):
-    await asyncio.sleep(delay_seconds)
+async def delete_dm_message(chat_id: int, message_id: int):
+    await asyncio.sleep(0)  # no-op, ensures coroutine
     try:
         await app.delete_messages(chat_id, message_id)
     except Exception:
+        # if deletion fails (message older than 48 hours or already deleted), ignore
         pass
 
-async def send_reminder_job(tourn_id: str, mins_before: int):
-    tourn = await tournaments_col.find_one({"_id": ObjectId(tourn_id)})
-    if not tourn:
-        return
-    regs_cursor = registrations_col.find({"tourn_id": tourn_id})
-    text = f"Reminder: match *{tourn.get('name')}* starts in {mins_before} minutes."
-    async for r in regs_cursor:
-        try:
-            await app.send_message(r["user_id"], text, parse_mode="markdown")
-        except Exception:
-            logger.info(f"Could not send reminder to {r['user_id']}")
+# ------------------ Announce winner (admin) ------------------
 
 @app.on_message(filters.command("announce_winner") & filters.user(ADMIN_ID))
 async def cmd_announce_winner(client: Client, message: Message):
@@ -336,17 +366,22 @@ async def cmd_announce_winner(client: Client, message: Message):
         await message.reply_text("Usage: /announce_winner <tourn_id> <winner_ign>")
         return
     tourn_id = args[1]; winner = args[2]
-    # announce to admin channel (or to admin only)
-    await message.reply_text(f"Winner for {tourn_id}: {winner}")
-    await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "finished", "winner": winner}})
+    # set finished and store winner
+    try:
+        await tournaments_col.update_one({"_id": ObjectId(tourn_id)}, {"$set": {"status": "finished", "winner": winner}})
+        await message.reply_text(f"Marked tournament {tourn_id} as finished. Winner: {winner}")
+    except Exception:
+        await message.reply_text("Error updating tournament. Check tourn_id.")
 
-# Access tokens / premium (simple admin commands)
+# ------------------ Access tokens (admin) ------------------
+
 @app.on_message(filters.command("tokens") & filters.user(ADMIN_ID))
 async def cmd_tokens(client: Client, message: Message):
     cursor = access_col.find({})
     out = "Active access tokens (temporary premium):\n"
     async for a in cursor:
-        out += f"- user_id: {a.get('user_id')} | until: {a.get('expires_at')}\n"
+        expires = a.get("expires_at")
+        out += f"- user_id: {a.get('user_id')} | until: {expires}\n"
     await message.reply_text(out)
 
 @app.on_message(filters.command("access") & filters.user(ADMIN_ID))
@@ -356,7 +391,7 @@ async def cmd_access(client: Client, message: Message):
         await message.reply_text("Usage: /access <username_or_id> <hours>")
         return
     target = args[1]; hours = int(args[2])
-    # resolve username to id if startswith @
+    # resolve username to id if needed
     if target.startswith("@"):
         try:
             user_obj = await app.get_users(target)
@@ -374,7 +409,8 @@ async def cmd_access(client: Client, message: Message):
     await access_col.insert_one({"user_id": user_id, "expires_at": expires})
     await message.reply_text(f"Access granted to {user_id} until {expires} UTC.")
 
-# Simple /participants (player can view their regs)
+# ------------------ View my registrations (callback) ------------------
+
 @app.on_callback_query(filters.regex("^my_regs$"))
 async def cb_my_regs(client: Client, callback: CallbackQuery):
     uid = callback.from_user.id
@@ -390,7 +426,8 @@ async def cb_my_regs(client: Client, callback: CallbackQuery):
     await callback.answer()
     await callback.message.reply_text(out)
 
-# Graceful start
+# ------------------ Graceful start ------------------
+
 if __name__ == "__main__":
     logger.info("Starting BGMI Tournament Bot...")
     app.run()
